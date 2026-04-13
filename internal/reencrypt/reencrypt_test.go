@@ -47,13 +47,8 @@ var _ = Describe("Reencrypt", Ordered, func() {
 
 		// First round (generate encrypted secrets)
 		encryptPrivKeyPath := path.Join(tmpDir, "private1")
-		encryptPublicKeyPath := path.Join(tmpDir, "public1")
-		err = crypt.GenerateKeyPair(encryptPrivKeyPath, encryptPublicKeyPath)
-		Ω(err).Error().NotTo(HaveOccurred())
-
-		encryptPrivKey, err := crypt.NewPrivateKeysFromFiles([]string{encryptPrivKeyPath})
-		Ω(err).Error().NotTo(HaveOccurred())
-		myEncrypter, err = crypt.NewCryptFromKeys(encryptPrivKey, encryptPublicKeyPath, paasName)
+		myEncrypter, err = crypt.NewGeneratedCrypt(encryptPrivKeyPath, path.Join(tmpDir, "public1"),
+			paasName)
 		Ω(err).Error().NotTo(HaveOccurred())
 
 		// Second round (reencrypt secrets)
@@ -70,9 +65,8 @@ var _ = Describe("Reencrypt", Ordered, func() {
 		}
 
 		// Third round (decrypt reencrypted secrets)
-		reencryptedPrivateKey, err := crypt.NewPrivateKeysFromFiles([]string{reencryptedPrivKeyPath})
 		Ω(err).Error().NotTo(HaveOccurred())
-		myDecrypter, err = crypt.NewCryptFromKeys(reencryptedPrivateKey, reencryptedPublicKeyPath, paasName)
+		myDecrypter, err = crypt.NewCryptFromFiles([]string{reencryptedPrivKeyPath}, reencryptedPublicKeyPath, paasName)
 		Ω(err).Error().NotTo(HaveOccurred())
 
 		paasFilesPath := path.Join(tmpDir, "paas")

@@ -34,7 +34,6 @@ const AESKeySize = 4096
 // decryption tasks.
 type Crypt struct {
 	privateKeys       PrivateKeys
-	publicKeyPath     string
 	publicKey         *rsa.PublicKey
 	encryptionContext []byte
 }
@@ -50,21 +49,32 @@ func NewCryptFromFiles(privateKeyPaths []string, publicKeyPath string, encryptio
 	if err != nil {
 		return nil, err
 	}
-	return NewCryptFromKeys(privateKeys, publicKeyPath, encryptionContext)
-}
-
-// NewCryptFromKeys returns a Crypt based on the provided privateKeys and publicKey using the encryptionContext
-func NewCryptFromKeys(privateKeys PrivateKeys, publicKeyPath string, encryptionContext string) (*Crypt, error) {
+	var pubKey *rsa.PublicKey
 	if publicKeyPath != "" {
-		publicKeyPaths := []string{publicKeyPath}
-		if _, err := utils.PathToFileList(publicKeyPaths); err != nil {
-			return nil, fmt.Errorf("could not find files in '%v': %w", publicKeyPaths, err)
+		pubKey, err = readPublicKeyFromDisk(publicKeyPath)
+		if err != nil {
+			return nil, err
 		}
 	}
-
 	return &Crypt{
 		privateKeys:       privateKeys,
-		publicKeyPath:     publicKeyPath,
+		publicKey:         pubKey,
+		encryptionContext: []byte(encryptionContext),
+	}, nil
+}
+
+// NewCryptFromKeys returns a Crypt based on the provided privateKeys and publicKey (from memory) using the
+// encryptionContext
+func NewCryptFromKeys(privateKeys PrivateKeys, publicKey *rsa.PublicKey, encryptionContext string) (*Crypt, error) {
+	if publicKey == nil {
+		var err error
+		if publicKey, err = privateKeys.PublicKey(); err != nil {
+			return nil, err
+		}
+	}
+	return &Crypt{
+		privateKeys:       privateKeys,
+		publicKey:         publicKey,
 		encryptionContext: []byte(encryptionContext),
 	}, nil
 }
@@ -78,79 +88,41 @@ func NewCryptFromKeys(privateKeys PrivateKeys, publicKeyPath string, encryptionC
 // This method returns an error if it is unable to generate a valid key pair or
 // write the keys to disk.
 func NewGeneratedCrypt(privateKeyPath string, publicKeyPath string, context string) (*Crypt, error) {
-	var privateKey *rsa.PrivateKey
 	var err error
 
 	c := Crypt{
 		encryptionContext: []byte(context),
 	}
-	if privateKey, err = rsa.GenerateKey(rand.Reader, AESKeySize); err != nil {
-		return nil, fmt.Errorf("unable to generate private key: %w", err)
-	}
-
-	pk := PrivateKey{
-		privateKey:     privateKey,
-		privateKeyPath: privateKeyPath,
-	}
-	c.privateKeys = PrivateKeys{&pk}
-	if err := pk.writePrivateKey(); err != nil {
+	pk, err := GeneratePrivateKey()
+	if err != nil {
 		return nil, err
 	}
-
-	c.publicKeyPath = publicKeyPath
-	c.publicKey = &privateKey.PublicKey
-	if err := c.writePublicKey(); err != nil {
+	c.privateKeys = PrivateKeys{pk.GetID(): pk}
+	if err = pk.WritePrivateKey(privateKeyPath); err != nil {
 		return nil, err
 	}
-
+	if err = pk.WritePublicKey(publicKeyPath); err != nil {
+		return nil, err
+	}
+	c.publicKey = &pk.privateKey.PublicKey
 	return &c, nil
 }
 
-// WritePublicKey writes the public key of the RSA private key to a file.
-//
-// If a path was specified when creating the Crypt object, the public key will be written
-// to that location. The format used is PEM-encoded ASN.1 (RFC 1421).
-func (c *Crypt) writePublicKey() error {
-	var publicKeyBytes []byte
-	var err error
-
-	if c.publicKeyPath == "" {
-		return errors.New("cannot write public key without a specified path")
-	}
-	if publicKeyBytes, err = x509.MarshalPKIXPublicKey(c.publicKey); err != nil {
-		return fmt.Errorf("unable to marshal public key: %w", err)
-	}
-
-	publicKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PUBLIC KEY",
-		Bytes: publicKeyBytes,
-	})
-
-	if err = os.WriteFile(c.publicKeyPath, publicKeyPEM, fileModeUserReadWrite); err != nil {
-		return fmt.Errorf("unable to write public key: %w", err)
-	}
-
-	fmt.Printf("Public key written to %s\n", c.publicKeyPath)
-	return nil
-}
-
-// getPublicKey retrieves and returns the public key associated with this Crypt instance.
-//
-// If the public key has already been loaded, it is returned immediately. Otherwise,
-// the public key is read from the file specified by publicKeyPath if provided.
-// If the file does not exist or cannot be decoded as a valid RSA public key, an error
-// is returned.
-func (c *Crypt) getPublicKey() (*rsa.PublicKey, error) {
+// readPublicKeyFromDisk retrieves and returns the public key from a file
+func readPublicKeyFromDisk(path string) (*rsa.PublicKey, error) {
 	var publicRsaKey *rsa.PublicKey
 	var ok bool
 
-	if c.publicKey != nil {
-		return c.publicKey, nil
+	paths, err := utils.PathToFileList([]string{path})
+	if err != nil {
+		return nil, fmt.Errorf("could not find files in '%v': %w", path, err)
 	}
-	if c.publicKeyPath == "" {
-		return nil, errors.New("cannot get public key without a specified path")
+	if len(paths) != 1 {
+		return nil, fmt.Errorf("zero or more than one files at %s", path)
 	}
-	if publicKeyPEM, err := os.ReadFile(c.publicKeyPath); err != nil {
+	path = paths[0]
+
+	if publicKeyPEM, err := os.ReadFile(path); err != nil {
 		panic(err)
 	} else if publicKeyBlock, _ := pem.Decode(publicKeyPEM); publicKeyBlock == nil {
 		return nil, errors.New("cannot decode public key")
@@ -159,10 +131,22 @@ func (c *Crypt) getPublicKey() (*rsa.PublicKey, error) {
 	} else if publicRsaKey, ok = publicKey.(*rsa.PublicKey); !ok {
 		return nil, errors.New("public key not rsa public key")
 	}
+	return publicRsaKey, nil
+}
 
-	c.publicKey = publicRsaKey
-
-	return c.publicKey, nil
+// GetPublicKey returns the public key from a crypt
+func (c *Crypt) GetPublicKey() (*rsa.PublicKey, error) {
+	if c.publicKey != nil {
+		return c.publicKey, nil
+	}
+	if c.privateKeys != nil {
+		pubKey, err := c.privateKeys.PublicKey()
+		if err != nil {
+			return nil, fmt.Errorf("no public key set, and error while retrieving from private keys: %e", err)
+		}
+		return pubKey, nil
+	}
+	return nil, errors.New("no public key and no private keys")
 }
 
 // EncryptRsa encrypts the provided secret using RSA-OAEP encryption with the public key.
@@ -170,7 +154,7 @@ func (c *Crypt) EncryptRsa(secret []byte) (encryptedBytes []byte, err error) {
 	var publicKey *rsa.PublicKey
 	var encryptedBlock []byte
 
-	if publicKey, err = c.getPublicKey(); err != nil {
+	if publicKey, err = c.GetPublicKey(); err != nil {
 		return nil, err
 	}
 
