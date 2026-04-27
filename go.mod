@@ -3,7 +3,7 @@ module github.com/belastingdienst/opr-paas-cli/v2
 go 1.25.0
 
 require (
-	github.com/belastingdienst/opr-paas/v5 v5.2.0
+	github.com/belastingdienst/opr-paas/v5 v5.4.5
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
@@ -55,7 +55,7 @@ require (
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/term v0.39.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
