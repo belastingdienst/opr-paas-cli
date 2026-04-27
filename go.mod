@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/belastingdienst/opr-paas/v5 v5.2.0
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/onsi/ginkgo/v2 v2.28.1
+	github.com/onsi/ginkgo/v2 v2.28.2
 	github.com/onsi/gomega v1.39.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
