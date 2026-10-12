@@ -8,6 +8,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/belastingdienst/opr-paas-cli/v2/internal/paasfile"
@@ -26,6 +27,7 @@ func generateCmd() *cobra.Command {
 	var privateKeyFile string
 	var outputFormat string
 	var encryptionSecretName string
+	var algorithm string
 
 	cmd := &cobra.Command{
 		Use:   "generate [command options]",
@@ -79,7 +81,15 @@ func generateCmd() *cobra.Command {
 					publicKeyFile = pub.Name()
 				}
 			}
-			pk, err := crypt.GeneratePrivateKey()
+			var pk *crypt.PrivateKey
+			switch algorithm {
+			case "", "rsa":
+				pk, err = crypt.GeneratePrivateKey()
+			case "ml-kem-768":
+				pk, err = crypt.GenerateMLKEM768PrivateKey()
+			default:
+				return fmt.Errorf("unsupported --algorithm %q (expected 'rsa' or 'ml-kem-768')", algorithm)
+			}
 			if err != nil {
 				return err
 			}
@@ -105,12 +115,16 @@ func generateCmd() *cobra.Command {
 		"The output format (leave empty to use the default)")
 	flags.StringVarP(&encryptionSecretName, argNameEncSecretName, "S", "",
 		"The name of the secret conating the encryption keys (leave empty to use from PaasConfig)")
+	flags.StringVar(&algorithm, argNameAlgorithm, "rsa",
+		"The key algorithm to generate: 'rsa' (default, RSA-4096-OAEP) or "+
+			"'ml-kem-768' (post-quantum hybrid ML-KEM-768 + AES-256-GCM)")
 
 	for envVar, arg := range map[string]string{
 		"PAAS_PRIVATE_KEY_PATH":  argNamePrivateKeyFile,
 		"PAAS_PUBLIC_KEY_PATH":   argNamePublicKeyFile,
 		"PAAS_FORMAT":            argNameOutputFormat,
 		"PAAS_ENCRYPTION_SECRET": argNameEncSecretName,
+		"PAAS_ALGORITHM":         argNameAlgorithm,
 	} {
 		if err := viper.BindPFlag(arg, flags.Lookup(arg)); err != nil {
 			logrus.Errorf("key binding for %s failed: %v", arg, err)

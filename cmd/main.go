@@ -32,6 +32,7 @@ const (
 	argNameCapabilityName     = "capabilityName"
 	argNameLabelSelector      = "selector"
 	argNameAnnotationSelector = "annotations"
+	argNameAlgorithm          = "algorithm"
 )
 
 var debug bool
