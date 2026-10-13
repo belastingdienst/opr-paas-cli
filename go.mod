@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/belastingdienst/opr-paas/v5 v5.13.0
-	github.com/onsi/ginkgo/v2 v2.33.0
+	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/sirupsen/logrus v1.10.2
 	github.com/spf13/cobra v1.10.2
