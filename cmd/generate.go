@@ -16,6 +16,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -35,7 +37,6 @@ func generateCmd() *cobra.Command {
 			if debug {
 				logrus.SetLevel(logrus.DebugLevel)
 			}
-			var pks = crypt.PrivateKeys{}
 			var oKey *types.NamespacedName
 			format, err := paasfile.FormatFromString(outputFormat)
 			if err != nil {
@@ -48,12 +49,17 @@ func generateCmd() *cobra.Command {
 				}
 			}
 			secret, err := plugin.GetPaasSecret(command.Context(), oKey)
-			if err != nil {
-				if outputFormat != "" && secret == nil {
+			if err != nil && secret == nil {
+				// No PaasConfig exists or no secret was found. This is expected when
+				// bootstrapping a cluster: generating a keypair is the first step.
+				// Fall back to an empty secret in that case.
+				if outputFormat != "" || !(errors.Is(err, plugin.ErrNoPaasConfigs) || errors.Is(err, plugin.ErrNoSecret)) {
 					return err
 				}
+				secret = &corev1.Secret{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"}}
 			}
-			if pks, err = keysFromK8s(command.Context(), encryptionSecretName); err != nil {
+			pks, err := crypt.NewPrivateKeysFromSecretData(secret.Data)
+			if err != nil {
 				return err
 			}
 			if format == paasfile.DefaultFormat {
