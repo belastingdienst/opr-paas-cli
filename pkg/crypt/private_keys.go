@@ -8,6 +8,7 @@ package crypt
 
 import (
 	"bytes"
+	"crypto/hpke"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -73,24 +74,39 @@ func NewPrivateKeysFromSecretData(privateKeyData map[string][]byte) (PrivateKeys
 	return privateKeys, nil
 }
 
-// PublicKey returns a public key from a set of private keys in some scenarios (only one private key, or a 'current'
-// key)
-func (pks PrivateKeys) PublicKey() (*rsa.PublicKey, error) {
+// currentKey returns the PrivateKey to use when no public key was explicitly provided: the sole key if
+// there is exactly one, or the key flagged 'current' when there are several. Callers branch on its
+// Algorithm to get at the right kind of public component.
+func (pks PrivateKeys) currentKey() (*PrivateKey, error) {
 	if len(pks) == 0 {
 		return nil, errors.New("cannot get Public key from an empty map of private keys")
 	}
 	if len(pks) == 1 {
 		for _, pk := range pks {
-			return &pk.privateKey.PublicKey, nil
+			return pk, nil
 		}
 	}
 
 	for _, pk := range pks {
 		if pk.isCurrent {
-			return &pk.privateKey.PublicKey, nil
+			return pk, nil
 		}
 	}
 	return nil, errors.New("cannot get Public key from multiple keys unless there is a 'current' key")
+}
+
+// PublicKey returns the RSA public key from a set of private keys in some scenarios (only one private
+// key, or a 'current' key). It only supports RSA keys and returns an error when the selected key uses
+// another algorithm; use currentKey for algorithm-agnostic callers.
+func (pks PrivateKeys) PublicKey() (*rsa.PublicKey, error) {
+	pk, err := pks.currentKey()
+	if err != nil {
+		return nil, err
+	}
+	if pk.algorithm != AlgorithmRSAOAEP || pk.privateKey == nil {
+		return nil, fmt.Errorf("current key uses %s, not RSA; use Crypt.Encrypt instead", pk.algorithm)
+	}
+	return &pk.privateKey.PublicKey, nil
 }
 
 // Compare checks 2 sets of private keys
@@ -100,7 +116,20 @@ func (pks PrivateKeys) Compare(other PrivateKeys) (same bool) {
 	}
 
 	for index, key := range pks {
-		if !key.privateKey.Equal(other[index]) {
+		otherKey, exists := other[index]
+		if !exists {
+			return false
+		}
+		if key.algorithm != otherKey.algorithm {
+			return false
+		}
+		if key.algorithm == AlgorithmMLKEM768 {
+			if !bytes.Equal(key.privateKeyPem, otherKey.privateKeyPem) {
+				return false
+			}
+			continue
+		}
+		if !key.privateKey.Equal(otherKey.privateKey) {
 			return false
 		}
 	}
@@ -123,12 +152,16 @@ func (pks PrivateKeys) AsSecretData() (data map[string][]byte) {
 	return data
 }
 
-// A PrivateKey is used for decryption of encrypted secrets
+// A PrivateKey is used for decryption of encrypted secrets. Algorithm identifies which scheme it belongs
+// to (AlgorithmRSAOAEP or AlgorithmMLKEM768); only the corresponding key field below is populated:
+// privateKey for RSA, hybridKey for the MLKEM768-X25519 scheme (see hybrid.go).
 type PrivateKey struct {
 	timestamp     time.Time
 	fingerprint   string
 	privateKeyPem []byte
 	privateKey    *rsa.PrivateKey
+	algorithm     string
+	hybridKey     hpke.PrivateKey
 	isCurrent     bool
 }
 
@@ -168,6 +201,15 @@ func NewPrivateKeyFromPem(privateKeyPath string, privateKeyPem []byte) (*Private
 		return nil, errors.New("error while decoding PEM")
 	}
 
+	isCurrent := filepath.Base(privateKeyPath) == "current"
+	if isCurrent {
+		isCurrent = true
+	}
+
+	if block.Type == mlkemPrivateKeyPEMType {
+		return newMLKEM768PrivateKeyFromPem(privateKeyPem, block, isCurrent)
+	}
+
 	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
 		genericKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
@@ -181,18 +223,38 @@ func NewPrivateKeyFromPem(privateKeyPath string, privateKeyPem []byte) (*Private
 		}
 	}
 
-	isCurrent := filepath.Base(privateKeyPath) == "current"
-	if isCurrent {
-		isCurrent = true
-	}
-
 	return &PrivateKey{
 		timestamp:     time.Now(),
 		fingerprint:   fmt.Sprintf("%x", sha256.Sum256(key.N.Bytes())),
 		privateKeyPem: privateKeyPem,
 		privateKey:    key,
+		algorithm:     AlgorithmRSAOAEP,
 		isCurrent:     isCurrent,
 	}, nil
+}
+
+// newMLKEM768PrivateKeyFromPem parses an MLKEM768-X25519 private key: block.Bytes holds the 32-byte
+// X-Wing seed, from which both the ML-KEM-768 and the X25519 key are derived.
+func newMLKEM768PrivateKeyFromPem(privateKeyPem []byte, block *pem.Block, isCurrent bool) (*PrivateKey, error) {
+	kem, _, _ := hybridSuite()
+	key, err := kem.NewPrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid MLKEM768-X25519 private key: %w", err)
+	}
+
+	return &PrivateKey{
+		timestamp:     time.Now(),
+		fingerprint:   hybridFingerprint(key),
+		privateKeyPem: privateKeyPem,
+		algorithm:     AlgorithmMLKEM768,
+		hybridKey:     key,
+		isCurrent:     isCurrent,
+	}, nil
+}
+
+// hybridFingerprint returns the SHA-256 of the serialized public key, as RSA keys use the modulus.
+func hybridFingerprint(key hpke.PrivateKey) string {
+	return fmt.Sprintf("%x", sha256.Sum256(key.PublicKey().Bytes()))
 }
 
 // WritePrivateKey writes a private key to a file at the specified path.
@@ -200,11 +262,21 @@ func (pk PrivateKey) WritePrivateKey(path string) error {
 	if path == "" {
 		return nil
 	}
-	privateKeyBytes := x509.MarshalPKCS1PrivateKey(pk.privateKey)
-	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: privateKeyBytes,
-	})
+
+	var privateKeyPEM []byte
+	if pk.algorithm == AlgorithmMLKEM768 {
+		seed, err := pk.hybridKey.Bytes()
+		if err != nil {
+			return fmt.Errorf("unable to serialize private key: %w", err)
+		}
+		privateKeyPEM = pem.EncodeToMemory(&pem.Block{Type: mlkemPrivateKeyPEMType, Bytes: seed})
+	} else {
+		privateKeyBytes := x509.MarshalPKCS1PrivateKey(pk.privateKey)
+		privateKeyPEM = pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: privateKeyBytes,
+		})
+	}
 
 	if err := os.WriteFile(path, privateKeyPEM, fileModeUserReadWrite); err != nil {
 		return fmt.Errorf("unable to write private key: %w", err)
@@ -213,27 +285,35 @@ func (pk PrivateKey) WritePrivateKey(path string) error {
 	return nil
 }
 
-// WritePublicKey writes the public key of the RSA private key to a file.
+// WritePublicKey writes the public key belonging to the private key to a file.
 //
 // If a path was specified when creating the Crypt object, the public key will be written
-// to that location. The format used is PEM-encoded ASN.1 (RFC 1421).
+// to that location. The format used is PEM-encoded ASN.1 (RFC 1421) for RSA keys, or a PEM
+// block carrying the serialized MLKEM768-X25519 public key for hybrid keys.
 func (pk PrivateKey) WritePublicKey(path string) error {
 	if path == "" {
 		return nil
 	}
-	var publicKeyBytes []byte
-	var err error
 
-	if publicKeyBytes, err = x509.MarshalPKIXPublicKey(&pk.privateKey.PublicKey); err != nil {
-		return fmt.Errorf("unable to marshal public key: %w", err)
+	var publicKeyPEM []byte
+
+	if pk.algorithm == AlgorithmMLKEM768 {
+		publicKeyPEM = pem.EncodeToMemory(&pem.Block{
+			Type:  mlkemPublicKeyPEMType,
+			Bytes: pk.hybridKey.PublicKey().Bytes(),
+		})
+	} else {
+		publicKeyBytes, err := x509.MarshalPKIXPublicKey(&pk.privateKey.PublicKey)
+		if err != nil {
+			return fmt.Errorf("unable to marshal public key: %w", err)
+		}
+		publicKeyPEM = pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PUBLIC KEY",
+			Bytes: publicKeyBytes,
+		})
 	}
 
-	publicKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PUBLIC KEY",
-		Bytes: publicKeyBytes,
-	})
-
-	if err = os.WriteFile(path, publicKeyPEM, fileModeUserReadWrite); err != nil {
+	if err := os.WriteFile(path, publicKeyPEM, fileModeUserReadWrite); err != nil {
 		return fmt.Errorf("unable to write public key: %w", err)
 	}
 
@@ -326,6 +406,35 @@ func GeneratePrivateKey() (*PrivateKey, error) {
 		timestamp:     timestamp,
 		privateKey:    privateKey,
 		privateKeyPem: pemBuffer.Bytes(),
+		algorithm:     AlgorithmRSAOAEP,
 	}
 	return &pk, nil
+}
+
+// GenerateMLKEM768PrivateKey generates a new MLKEM768-X25519 (X-Wing) key pair for the post-quantum
+// hybrid scheme (see hybrid.go). It mirrors GeneratePrivateKey's shape so both algorithms can live side
+// by side in the same PrivateKeys map, e.g. during a key-rotation migration via 'kubectl-paas reencrypt'.
+func GenerateMLKEM768PrivateKey() (*PrivateKey, error) {
+	kem, _, _ := hybridSuite()
+	key, err := kem.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("unable to generate MLKEM768-X25519 private key: %w", err)
+	}
+	seed, err := key.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("unable to serialize MLKEM768-X25519 private key: %w", err)
+	}
+
+	var pemBuffer bytes.Buffer
+	if err := pem.Encode(&pemBuffer, &pem.Block{Type: mlkemPrivateKeyPEMType, Bytes: seed}); err != nil {
+		return nil, fmt.Errorf("unable to encode MLKEM768-X25519 private key: %w", err)
+	}
+
+	return &PrivateKey{
+		fingerprint:   hybridFingerprint(key),
+		timestamp:     time.Now(),
+		algorithm:     AlgorithmMLKEM768,
+		hybridKey:     key,
+		privateKeyPem: pemBuffer.Bytes(),
+	}, nil
 }
