@@ -7,6 +7,7 @@ See LICENSE.md for details.
 package crypt
 
 import (
+	"crypto/hpke"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
@@ -36,7 +37,7 @@ const AESKeySize = 4096
 type Crypt struct {
 	privateKeys       PrivateKeys
 	publicKey         *rsa.PublicKey
-	hybridPublicKey   *hybridPublicKey
+	hybridPublicKey   hpke.PublicKey
 	encryptionContext []byte
 }
 
@@ -49,7 +50,7 @@ type Factory interface {
 // algorithm; exactly one of its fields is set.
 type resolvedPublicKey struct {
 	rsaKey    *rsa.PublicKey
-	hybridKey *hybridPublicKey
+	hybridKey hpke.PublicKey
 }
 
 // NewCryptFromFiles returns a Crypt based on the provided privateKeyPaths and publicKeyPath using the encryptionContext
@@ -75,8 +76,8 @@ func NewCryptFromFiles(privateKeyPaths []string, publicKeyPath string, encryptio
 
 // NewCryptFromKeys returns a Crypt based on the provided privateKeys and publicKey using the encryptionContext.
 //
-// publicKey accepts the historical public key path string argument, a *rsa.PublicKey or *hybridPublicKey
-// for in-memory keys, or nil to derive the public key from the private keys.
+// publicKey accepts the historical public key path string argument, a *rsa.PublicKey or an MLKEM768-X25519
+// hpke.PublicKey for in-memory keys, or nil to derive the public key from the private keys.
 func NewCryptFromKeys(privateKeys PrivateKeys, publicKey any, encryptionContext string) (*Crypt, error) {
 	resolved, err := resolvePublicKey(privateKeys, publicKey)
 	if err != nil {
@@ -103,9 +104,10 @@ func resolvePublicKey(privateKeys PrivateKeys, publicKey any) (*resolvedPublicKe
 			return nil, nil
 		}
 		return &resolvedPublicKey{rsaKey: value}, nil
-	case *hybridPublicKey:
-		if value == nil {
-			return nil, nil
+	case hpke.PublicKey:
+		kem, _, _ := hybridSuite()
+		if value.KEM().ID() != kem.ID() {
+			return nil, errors.New("unsupported hybrid public key")
 		}
 		return &resolvedPublicKey{hybridKey: value}, nil
 	case string:
@@ -148,7 +150,7 @@ func NewGeneratedCrypt(privateKeyPath string, publicKeyPath string, context stri
 }
 
 // readPublicKeyFromDisk retrieves and returns the public key from a file, detecting whether it is an
-// RSA or a combined X25519+ML-KEM-768 key from its PEM block type.
+// RSA or an MLKEM768-X25519 key from its PEM block type.
 func readPublicKeyFromDisk(path string) (*resolvedPublicKey, error) {
 	var publicRsaKey *rsa.PublicKey
 	var ok bool
@@ -260,8 +262,8 @@ func (c *Crypt) resolveEncryptionTarget() (*resolvedPublicKey, error) {
 }
 
 // Encrypt encrypts the secret and returns the result as a base64-encoded string, using whichever
-// algorithm resolveEncryptionTarget selects: the legacy RSA-OAEP scheme, or the X25519+ML-KEM-768+AES-
-// 256-GCM hybrid scheme (see hybrid.go) when a current ML-KEM-768 key is configured.
+// algorithm resolveEncryptionTarget selects: the legacy RSA-OAEP scheme, or the MLKEM768-X25519 HPKE
+// hybrid scheme (see hybrid.go) when a current hybrid key is configured.
 func (c *Crypt) Encrypt(secret []byte) (encrypted string, err error) {
 	target, err := c.resolveEncryptionTarget()
 	if err != nil {
@@ -303,8 +305,8 @@ func (c *Crypt) DecryptRsa(data []byte) (decryptedBytes []byte, err error) {
 	return nil, errors.New("unable to decrypt data with any of the private keys")
 }
 
-// decryptHybrid attempts to decrypt raw (an X25519+ML-KEM-768+AES-256-GCM hybrid ciphertext) using each
-// ML-KEM-768 private key until one succeeds or none are left.
+// decryptHybrid attempts to decrypt raw (an MLKEM768-X25519 HPKE hybrid ciphertext) using each hybrid
+// private key until one succeeds or none are left.
 func (c *Crypt) decryptHybrid(raw []byte) ([]byte, error) {
 	if len(c.privateKeys) < 1 {
 		return nil, errors.New("cannot decrypt without any private key")
@@ -313,7 +315,7 @@ func (c *Crypt) decryptHybrid(raw []byte) ([]byte, error) {
 		if pk.algorithm != AlgorithmMLKEM768 {
 			continue
 		}
-		decrypted, err := hybridDecrypt(pk.x25519PrivateKey, pk.mlkemPrivateKey, raw, c.encryptionContext)
+		decrypted, err := hybridDecrypt(pk.hybridKey, raw, c.encryptionContext)
 		if err == nil {
 			return decrypted, nil
 		}
@@ -321,8 +323,8 @@ func (c *Crypt) decryptHybrid(raw []byte) ([]byte, error) {
 	return nil, errors.New("unable to decrypt hybrid ciphertext with any of the private keys")
 }
 
-// Decrypt decrypts a base64-encoded message produced by Encrypt, dispatching to the RSA-OAEP or
-// X25519+ML-KEM-768+AES-256-GCM hybrid scheme depending on which one produced it (see isHybridCiphertext).
+// Decrypt decrypts a base64-encoded message produced by Encrypt, dispatching to the RSA-OAEP or the
+// MLKEM768-X25519 HPKE hybrid scheme depending on which one produced it (see isHybridCiphertext).
 func (c Crypt) Decrypt(b64 string) ([]byte, error) {
 	// Removing all characters that do not comply to base64 encoding (mainly \n and ' ')
 	re := regexp.MustCompile("[^ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=]")
@@ -334,7 +336,16 @@ func (c Crypt) Decrypt(b64 string) ([]byte, error) {
 	}
 
 	if isHybridCiphertext(raw) {
-		return c.decryptHybrid(raw)
+		decrypted, hybridErr := c.decryptHybrid(raw)
+		if hybridErr == nil {
+			return decrypted, nil
+		}
+		// A legacy RSA ciphertext has no header and can, very rarely, start with the same bytes as the
+		// hybrid header. Try the RSA keys before reporting the hybrid error.
+		if decrypted, err = c.DecryptRsa(raw); err == nil {
+			return decrypted, nil
+		}
+		return nil, hybridErr
 	}
 	return c.DecryptRsa(raw)
 }

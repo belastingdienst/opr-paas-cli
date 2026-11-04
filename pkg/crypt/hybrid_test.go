@@ -7,7 +7,12 @@ See LICENSE.md for details.
 package crypt
 
 import (
+	"crypto/ecdh"
+	"crypto/hpke"
+	"crypto/mlkem"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/pem"
 	"os"
 	"testing"
 
@@ -41,7 +46,37 @@ func TestMLKEM768Generate(t *testing.T) {
 	pk, err := GenerateMLKEM768PrivateKey()
 	require.NoError(t, err)
 	assert.Equal(t, AlgorithmMLKEM768, pk.algorithm)
-	assert.NotNil(t, pk.mlkemPrivateKey)
+	require.NotNil(t, pk.hybridKey)
+	assert.Equal(t, hpke.MLKEM768X25519().ID(), pk.hybridKey.KEM().ID(), "key must be MLKEM768-X25519 (X-Wing)")
+}
+
+// TestMLKEM768KeyFileFormat checks the on-disk format: the private key PEM holds the 32-byte X-Wing seed
+// and the public key PEM the 1,216-byte X-Wing encapsulation key, and both load back to the same key.
+func TestMLKEM768KeyFileFormat(t *testing.T) {
+	const (
+		seedSize      = 32
+		publicKeySize = 1216
+	)
+	privPath, pubPath, pk := writeMLKEMKeyPair(t)
+
+	privPem, err := os.ReadFile(privPath)
+	require.NoError(t, err)
+	privBlock, _ := pem.Decode(privPem)
+	require.NotNil(t, privBlock)
+	assert.Equal(t, mlkemPrivateKeyPEMType, privBlock.Type)
+	assert.Len(t, privBlock.Bytes, seedSize)
+
+	pubPem, err := os.ReadFile(pubPath)
+	require.NoError(t, err)
+	pubBlock, _ := pem.Decode(pubPem)
+	require.NotNil(t, pubBlock)
+	assert.Equal(t, mlkemPublicKeyPEMType, pubBlock.Type)
+	assert.Len(t, pubBlock.Bytes, publicKeySize)
+
+	reloaded, err := NewPrivateKeyFromFile(privPath)
+	require.NoError(t, err)
+	assert.Equal(t, pk.fingerprint, reloaded.fingerprint, "a reloaded key must have the same fingerprint")
+	assert.Equal(t, pubBlock.Bytes, reloaded.hybridKey.PublicKey().Bytes())
 }
 
 // TestMLKEM768EncryptDecrypt mirrors TestEncryptingAndDecrypting (the RSA case) for the new hybrid
@@ -180,38 +215,125 @@ func TestPrivateKeysCompareMixedAlgorithms(t *testing.T) {
 	assert.False(t, a.Compare(d), "keys of different algorithms should never compare equal")
 }
 
-// TestHybridCiphertextRequiresBothComponents proves the X25519 and ML-KEM-768 halves of the combined
-// scheme both actually contribute to the derived key -- decryption must fail if either private key
-// doesn't match the one the ciphertext was encrypted for, confirming neither component is silently
-// unused (i.e. this is a real combined hybrid, not ML-KEM-768 alone with inert X25519 bytes attached).
+// TestHybridCiphertextRequiresBothComponents proves the ML-KEM-768 and X25519 halves of the X-Wing key
+// both contribute: decryption must fail if either half doesn't match the key the ciphertext was
+// encrypted for.
 func TestHybridCiphertextRequiresBothComponents(t *testing.T) {
 	const original = "Dit is een test"
 	const context = "context"
 
-	pkA, err := GenerateMLKEM768PrivateKey()
+	mlkemA, err := mlkem.GenerateKey768()
 	require.NoError(t, err)
-	pkB, err := GenerateMLKEM768PrivateKey()
+	mlkemB, err := mlkem.GenerateKey768()
 	require.NoError(t, err)
-
-	pubA, err := hybridPublicKeyFromPrivate(pkA)
+	x25519A, err := ecdh.X25519().GenerateKey(nil)
 	require.NoError(t, err)
-
-	ciphertext, err := hybridEncrypt(pubA, []byte(original), []byte(context))
+	x25519B, err := ecdh.X25519().GenerateKey(nil)
 	require.NoError(t, err)
 
-	// Correct key on both halves: decrypts.
-	decrypted, err := hybridDecrypt(pkA.x25519PrivateKey, pkA.mlkemPrivateKey, ciphertext, []byte(context))
+	keyA, err := hpke.NewHybridPrivateKey(mlkemA, x25519A)
+	require.NoError(t, err)
+	wrongX25519, err := hpke.NewHybridPrivateKey(mlkemA, x25519B)
+	require.NoError(t, err)
+	wrongMLKEM, err := hpke.NewHybridPrivateKey(mlkemB, x25519A)
+	require.NoError(t, err)
+
+	ciphertext, err := hybridEncrypt(keyA.PublicKey(), []byte(original), []byte(context))
+	require.NoError(t, err)
+
+	decrypted, err := hybridDecrypt(keyA, ciphertext, []byte(context))
 	require.NoError(t, err)
 	assert.Equal(t, original, string(decrypted))
 
-	// Wrong X25519 half (pkB's), correct ML-KEM-768 half (pkA's): must fail.
-	_, err = hybridDecrypt(pkB.x25519PrivateKey, pkA.mlkemPrivateKey, ciphertext, []byte(context))
-	assert.Error(t, err, "a mismatched X25519 private key must not decrypt -- the ECDH half must actually matter")
+	_, err = hybridDecrypt(wrongX25519, ciphertext, []byte(context))
+	assert.Error(t, err, "a mismatched X25519 half must not decrypt")
 
-	// Correct X25519 half (pkA's), wrong ML-KEM-768 half (pkB's): must fail.
-	_, err = hybridDecrypt(pkA.x25519PrivateKey, pkB.mlkemPrivateKey, ciphertext, []byte(context))
-	assert.Error(t, err, "a mismatched ML-KEM-768 private key must not decrypt -- the KEM half must actually matter")
+	_, err = hybridDecrypt(wrongMLKEM, ciphertext, []byte(context))
+	assert.Error(t, err, "a mismatched ML-KEM-768 half must not decrypt")
 }
+
+// TestHybridCiphertextHeader checks that a ciphertext names its HPKE suite, and that a ciphertext with
+// another suite or a damaged body is rejected with an error.
+func TestHybridCiphertextHeader(t *testing.T) {
+	pk, err := GenerateMLKEM768PrivateKey()
+	require.NoError(t, err)
+	pub, err := hybridPublicKeyFromPrivate(pk)
+	require.NoError(t, err)
+
+	ciphertext, err := hybridEncrypt(pub, []byte("secret"), []byte(testContext))
+	require.NoError(t, err)
+	require.True(t, isHybridCiphertext(ciphertext))
+
+	kem, kdf, aead := hybridSuite()
+	assert.Equal(t, hybridMagic, string(ciphertext[:len(hybridMagic)]))
+	assert.Equal(t, kem.ID(), binary.BigEndian.Uint16(ciphertext[4:6]))
+	assert.Equal(t, kdf.ID(), binary.BigEndian.Uint16(ciphertext[6:8]))
+	assert.Equal(t, aead.ID(), binary.BigEndian.Uint16(ciphertext[8:10]))
+
+	otherSuite := append([]byte{}, ciphertext...)
+	binary.BigEndian.PutUint16(otherSuite[8:10], hpke.ChaCha20Poly1305().ID())
+	_, err = hybridDecrypt(pk.hybridKey, otherSuite, []byte(testContext))
+	assert.ErrorContains(t, err, "unsupported hybrid ciphersuite")
+
+	damaged := append([]byte{}, ciphertext...)
+	damaged[len(damaged)-1] ^= flipAllBits
+	_, err = hybridDecrypt(pk.hybridKey, damaged, []byte(testContext))
+	assert.Error(t, err, "a modified ciphertext must not decrypt")
+
+	_, err = hybridDecrypt(pk.hybridKey, ciphertext[:hybridHeaderSize+10], []byte(testContext))
+	assert.Error(t, err, "a truncated ciphertext must not decrypt")
+}
+
+// TestPublicKeyWithHybridCurrentKey checks that the RSA-only accessors return an error instead of
+// panicking when the current key is a hybrid key.
+func TestPublicKeyWithHybridCurrentKey(t *testing.T) {
+	pk, err := GenerateMLKEM768PrivateKey()
+	require.NoError(t, err)
+	keys := PrivateKeys{"current": pk}
+
+	assert.NotPanics(t, func() {
+		_, err = keys.PublicKey()
+	})
+	assert.Error(t, err)
+
+	c, err := NewCryptFromKeys(keys, nil, testContext)
+	require.NoError(t, err)
+	assert.NotPanics(t, func() {
+		_, err = c.GetPublicKey()
+	})
+	assert.Error(t, err)
+
+	encrypted, err := c.Encrypt([]byte("secret"))
+	require.NoError(t, err, "Encrypt must still work with a hybrid current key")
+	decrypted, err := c.Decrypt(encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, "secret", string(decrypted))
+}
+
+// TestNewCryptFromKeysWithHybridPublicKey checks that an in-memory hybrid public key is accepted, and
+// that a public key of another HPKE KEM is refused.
+func TestNewCryptFromKeysWithHybridPublicKey(t *testing.T) {
+	pk, err := GenerateMLKEM768PrivateKey()
+	require.NoError(t, err)
+
+	c, err := NewCryptFromKeys(PrivateKeys{"k": pk}, pk.hybridKey.PublicKey(), testContext)
+	require.NoError(t, err)
+	encrypted, err := c.Encrypt([]byte("secret"))
+	require.NoError(t, err)
+	assert.True(t, isHybridCiphertext(mustBase64Decode(t, encrypted)))
+
+	other, err := hpke.MLKEM768().GenerateKey()
+	require.NoError(t, err)
+	_, err = NewCryptFromKeys(PrivateKeys{"k": pk}, other.PublicKey(), testContext)
+	assert.Error(t, err)
+}
+
+const (
+	// testContext is the encryption context (the Paas name in production) used by the hybrid tests.
+	testContext = "context"
+	// flipAllBits inverts a byte to simulate a modified ciphertext.
+	flipAllBits = 0xff
+)
 
 func mustBase64Decode(t *testing.T, s string) []byte {
 	t.Helper()

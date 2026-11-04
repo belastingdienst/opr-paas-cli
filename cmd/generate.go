@@ -117,7 +117,7 @@ func generateCmd() *cobra.Command {
 		"The name of the secret conating the encryption keys (leave empty to use from PaasConfig)")
 	flags.StringVar(&algorithm, argNameAlgorithm, "rsa",
 		"The key algorithm to generate: 'rsa' (default, RSA-4096-OAEP) or "+
-			"'ml-kem-768' (post-quantum hybrid ML-KEM-768 + AES-256-GCM)")
+			"'ml-kem-768' (post-quantum hybrid MLKEM768-X25519 (X-Wing) with HPKE and AES-256-GCM)")
 
 	for envVar, arg := range map[string]string{
 		"PAAS_PRIVATE_KEY_PATH":  argNamePrivateKeyFile,
