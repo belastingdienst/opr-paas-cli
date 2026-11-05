@@ -167,6 +167,8 @@ var _ = Describe("Reencrypt", Ordered, func() {
 			Ω(err).Error().NotTo(HaveOccurred())
 			err = otherService.ReencryptObjects(files, "", "")
 			Ω(err).Error().To(HaveOccurred())
+			Ω(err.Error()).To(ContainSubstring("failed to decrypt/reencrypt"))
+			Ω(err.Error()).NotTo(ContainSubstring("%!"), "error message is not garbled")
 		})
 	})
 })
