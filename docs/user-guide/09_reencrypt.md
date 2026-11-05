@@ -13,9 +13,11 @@ The most common use case is to re-encrypt secrets in PAAS files using a new key:
 `kubectl-paas reencrypt --privateKeyFiles "/tmp/priv" --publicKeyFile "/tmp/pub" [file or dir] ([file or dir]...)`
 
 !!! note
-    Rencryption without the --preserve option will always convert to the latest api version (currently v1alpha2).
-    The --preserved option has no extra validation on version and works for all currently known versions.
+    Re-encryption without `--outputFormat preserve` will always convert to the latest api version (currently v1alpha2).
+    `--outputFormat preserve` has no extra validation on version and works for all currently known versions.
     This may change in the future.
+    Because `--outputFormat preserve` replaces each encrypted value in the file itself, it cannot replace a value
+    that spans several lines. Re-encryption then fails without writing any file; use `--outputFormat auto` instead.
 
 ## Label and annotation filters
 

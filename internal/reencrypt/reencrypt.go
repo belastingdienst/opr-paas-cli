@@ -30,7 +30,7 @@ func (s *ConversionService) ReencryptObjects(
 	}
 
 	if len(errs) > 0 {
-		err := fmt.Errorf("finished with errors: %e", errors.Join(errs...))
+		err := fmt.Errorf("finished with errors: %w", errors.Join(errs...))
 		logrus.Error(err)
 		return err
 	}
