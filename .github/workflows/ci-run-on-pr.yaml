@@ -2,6 +2,7 @@ name: CI run on PR
 on:
   pull_request:
     types: [ opened, synchronize, reopened, ready_for_review ]
+  merge_group:
 
 env:
   # Golang version to use across CI steps
@@ -19,13 +20,15 @@ jobs:
         run: exit 1
   
   codechanges:
-    if: ${{ github.event.pull_request.draft == false }}
+    if: ${{ github.event.pull_request.draft != true }}
     runs-on: ubuntu-22.04
     outputs:
-      backend: ${{ steps.filter.outputs.backend_any_changed || steps.filter.outputs.ci_any_changed }}
+      # Always run everything in the merge queue; there is no PR diff to filter on there.
+      backend: ${{ github.event_name == 'merge_group' || steps.filter.outputs.backend_any_changed || steps.filter.outputs.ci_any_changed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.0.0
-      - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+      - if: ${{ github.event_name == 'pull_request' }}
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
         id: filter
         with:
           # Any file which is not under docs/, examples/, or is not a markdown file is counted as a backend file
@@ -43,7 +46,7 @@ jobs:
   check-go:
     name: Ensure Go modules synchronicity
     runs-on: ubuntu-22.04
-    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft == false}}
+    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft != true }}
     needs:
       - codechanges
     steps:
@@ -64,7 +67,7 @@ jobs:
   lint-go:
     name: Lint Go code
     runs-on: ubuntu-22.04
-    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft == false}}
+    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft != true }}
     needs:
       - codechanges
     permissions:
@@ -80,12 +83,14 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
+          # Pin the linter, so a new release cannot break main without a code change.
+          version: v2.15.0
           args: --verbose
  
   unit-test:
     name: Run unit tests
     runs-on: ubuntu-22.04
-    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft == false}}
+    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft != true }}
     needs:
       - codechanges
     steps:
@@ -106,7 +111,7 @@ jobs:
   e2e-test:
     name: Run e2e tests
     runs-on: ubuntu-22.04
-    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft == false}}
+    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft != true }}
     needs:
       - codechanges
     steps:
@@ -136,7 +141,7 @@ jobs:
 
   test-coverage:
     name: Analyze test coverage
-    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft == false}}
+    if: ${{ needs.codechanges.outputs.backend == 'true' && github.event.pull_request.draft != true }}
     runs-on: ubuntu-22.04
     needs:
       - unit-test
