@@ -53,7 +53,8 @@ func generateCmd() *cobra.Command {
 				// No PaasConfig exists or no secret was found. This is expected when
 				// bootstrapping a cluster: generating a keypair is the first step.
 				// Fall back to an empty secret in that case.
-				if outputFormat != "" || !(errors.Is(err, plugin.ErrNoPaasConfigs) || errors.Is(err, plugin.ErrNoSecret)) {
+				nothingToDo := errors.Is(err, plugin.ErrNoPaasConfigs) || errors.Is(err, plugin.ErrNoSecret)
+				if outputFormat != "" || !nothingToDo {
 					return err
 				}
 				secret = &corev1.Secret{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"}}
