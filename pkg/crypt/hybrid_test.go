@@ -199,18 +199,18 @@ func TestPrivateKeysCompareMixedAlgorithms(t *testing.T) {
 	mlkemPk, err := GenerateMLKEM768PrivateKey()
 	require.NoError(t, err)
 
-	a := PrivateKeys{"k": mlkemPk}
-	b := PrivateKeys{"k": mlkemPk}
+	a := PrivateKeys{testKeyName: mlkemPk}
+	b := PrivateKeys{testKeyName: mlkemPk}
 	assert.True(t, a.Compare(b), "identical ML-KEM-768 keys should compare equal")
 
 	otherMlkemPk, err := GenerateMLKEM768PrivateKey()
 	require.NoError(t, err)
-	c := PrivateKeys{"k": otherMlkemPk}
+	c := PrivateKeys{testKeyName: otherMlkemPk}
 	assert.False(t, a.Compare(c), "different ML-KEM-768 keys should not compare equal")
 
 	rsaPk, err := GeneratePrivateKey()
 	require.NoError(t, err)
-	d := PrivateKeys{"k": rsaPk}
+	d := PrivateKeys{testKeyName: rsaPk}
 	assert.NotPanics(t, func() { a.Compare(d) })
 	assert.False(t, a.Compare(d), "keys of different algorithms should never compare equal")
 }
@@ -266,12 +266,12 @@ func TestHybridCiphertextHeader(t *testing.T) {
 
 	kem, kdf, aead := hybridSuite()
 	assert.Equal(t, hybridMagic, string(ciphertext[:len(hybridMagic)]))
-	assert.Equal(t, kem.ID(), binary.BigEndian.Uint16(ciphertext[4:6]))
-	assert.Equal(t, kdf.ID(), binary.BigEndian.Uint16(ciphertext[6:8]))
-	assert.Equal(t, aead.ID(), binary.BigEndian.Uint16(ciphertext[8:10]))
+	assert.Equal(t, kem.ID(), binary.BigEndian.Uint16(ciphertext[kemIDOffset:]))
+	assert.Equal(t, kdf.ID(), binary.BigEndian.Uint16(ciphertext[kdfIDOffset:]))
+	assert.Equal(t, aead.ID(), binary.BigEndian.Uint16(ciphertext[aeadIDOffset:]))
 
 	otherSuite := append([]byte{}, ciphertext...)
-	binary.BigEndian.PutUint16(otherSuite[8:10], hpke.ChaCha20Poly1305().ID())
+	binary.BigEndian.PutUint16(otherSuite[aeadIDOffset:], hpke.ChaCha20Poly1305().ID())
 	_, err = hybridDecrypt(pk.hybridKey, otherSuite, []byte(testContext))
 	assert.ErrorContains(t, err, "unsupported hybrid ciphersuite")
 
@@ -280,7 +280,7 @@ func TestHybridCiphertextHeader(t *testing.T) {
 	_, err = hybridDecrypt(pk.hybridKey, damaged, []byte(testContext))
 	assert.Error(t, err, "a modified ciphertext must not decrypt")
 
-	_, err = hybridDecrypt(pk.hybridKey, ciphertext[:hybridHeaderSize+10], []byte(testContext))
+	_, err = hybridDecrypt(pk.hybridKey, ciphertext[:hybridHeaderSize+truncatedBodySize], []byte(testContext))
 	assert.Error(t, err, "a truncated ciphertext must not decrypt")
 }
 
@@ -316,7 +316,7 @@ func TestNewCryptFromKeysWithHybridPublicKey(t *testing.T) {
 	pk, err := GenerateMLKEM768PrivateKey()
 	require.NoError(t, err)
 
-	c, err := NewCryptFromKeys(PrivateKeys{"k": pk}, pk.hybridKey.PublicKey(), testContext)
+	c, err := NewCryptFromKeys(PrivateKeys{testKeyName: pk}, pk.hybridKey.PublicKey(), testContext)
 	require.NoError(t, err)
 	encrypted, err := c.Encrypt([]byte("secret"))
 	require.NoError(t, err)
@@ -324,7 +324,7 @@ func TestNewCryptFromKeysWithHybridPublicKey(t *testing.T) {
 
 	other, err := hpke.MLKEM768().GenerateKey()
 	require.NoError(t, err)
-	_, err = NewCryptFromKeys(PrivateKeys{"k": pk}, other.PublicKey(), testContext)
+	_, err = NewCryptFromKeys(PrivateKeys{testKeyName: pk}, other.PublicKey(), testContext)
 	assert.Error(t, err)
 }
 
@@ -333,6 +333,10 @@ const (
 	testContext = "context"
 	// flipAllBits inverts a byte to simulate a modified ciphertext.
 	flipAllBits = 0xff
+	// testKeyName is the name of the single key in the key sets of the hybrid tests.
+	testKeyName = "k"
+	// truncatedBodySize is how much of the ciphertext body a truncated ciphertext keeps.
+	truncatedBodySize = 10
 )
 
 func mustBase64Decode(t *testing.T, s string) []byte {

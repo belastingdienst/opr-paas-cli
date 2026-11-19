@@ -35,8 +35,14 @@ const (
 	// legacy raw RSA-OAEP ciphertext, which carries no header of its own. It is followed by the HPKE
 	// KEM, KDF and AEAD identifiers (2 bytes each, big endian), so the suite can change later without a
 	// new magic and a ciphertext names the algorithms that produced it.
-	hybridMagic      = "PQH1"
-	hybridHeaderSize = len(hybridMagic) + 6
+	hybridMagic = "PQH1"
+	// suiteIDSize is the size of one HPKE identifier in the header.
+	suiteIDSize = 2
+	// kemIDOffset, kdfIDOffset and aeadIDOffset are the positions of the suite identifiers.
+	kemIDOffset      = len(hybridMagic)
+	kdfIDOffset      = kemIDOffset + suiteIDSize
+	aeadIDOffset     = kdfIDOffset + suiteIDSize
+	hybridHeaderSize = aeadIDOffset + suiteIDSize
 )
 
 // hybridSuite returns the HPKE ciphersuite used for new and existing hybrid ciphertexts.
@@ -100,10 +106,9 @@ func hybridDecrypt(priv hpke.PrivateKey, raw []byte, encryptionContext []byte) (
 		return nil, errors.New("not a hybrid ciphertext")
 	}
 	kem, kdf, aead := hybridSuite()
-	suite := raw[len(hybridMagic):hybridHeaderSize]
-	if binary.BigEndian.Uint16(suite[0:2]) != kem.ID() ||
-		binary.BigEndian.Uint16(suite[2:4]) != kdf.ID() ||
-		binary.BigEndian.Uint16(suite[4:6]) != aead.ID() {
+	if binary.BigEndian.Uint16(raw[kemIDOffset:]) != kem.ID() ||
+		binary.BigEndian.Uint16(raw[kdfIDOffset:]) != kdf.ID() ||
+		binary.BigEndian.Uint16(raw[aeadIDOffset:]) != aead.ID() {
 		return nil, errors.New("unsupported hybrid ciphersuite")
 	}
 	return hpke.Open(priv, kdf, aead, encryptionContext, raw[hybridHeaderSize:])
