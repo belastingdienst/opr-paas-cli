@@ -66,6 +66,8 @@ func NewPrivateKeysFromSecretData(privateKeyData map[string][]byte) (PrivateKeys
 		if privateKey, err = NewPrivateKeyFromPem("", value); err != nil {
 			return nil, err
 		}
+		// Mark the entry named "current" as the current key, like NewPrivateKeyFromPem does for a file named "current".
+		privateKey.isCurrent = name == "current"
 
 		privateKeys[name] = privateKey
 	}
