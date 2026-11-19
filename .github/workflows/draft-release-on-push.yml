@@ -6,12 +6,12 @@ on:
     # branches to consider in the event; optional, defaults to all
     branches:
       - main
-  pull_request_target:
+  pull_request:
     types: [opened, reopened, synchronize]
 
 # Prevent overlapping runs from corrupting the draft release
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
