@@ -162,7 +162,7 @@ func (c *Crypt) GetPublicKey() (*rsa.PublicKey, error) {
 	if c.privateKeys != nil {
 		pubKey, err := c.privateKeys.PublicKey()
 		if err != nil {
-			return nil, fmt.Errorf("no public key set, and error while retrieving from private keys: %e", err)
+			return nil, fmt.Errorf("no public key set, and error while retrieving from private keys: %w", err)
 		}
 		return pubKey, nil
 	}

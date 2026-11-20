@@ -95,7 +95,7 @@ GOTEST_COVERAGE = $(LOCALBIN)/go-test-coverage
 KIND = $(LOCALBIN)/kind
 
 ## Tool Versions
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GOTEST_COVERAGE_VERSION ?= latest
 KIND_VERSION ?= v0.30.0
 
@@ -146,4 +146,3 @@ install-go-test-coverage:
 .PHONY: check-coverage
 check-coverage: install-go-test-coverage test ## check unittest coverage
 	${GOBIN}/go-test-coverage --config=./.testcoverage.yaml
-

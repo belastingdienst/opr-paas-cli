@@ -7,6 +7,7 @@ See LICENSE.md for details.
 package crypt
 
 import (
+	"errors"
 	"os"
 	"testing"
 
@@ -185,4 +186,118 @@ func TestNewCryptFromKeysWithNilPublicKey(t *testing.T) {
 	decrypted, err := c.Decrypt(encrypted)
 	require.NoError(t, err, "Decrypting")
 	assert.Equal(t, original, string(decrypted))
+}
+
+const (
+	secretTestContext = "my-paas"
+	secretTestData    = "WOEPTIDOE"
+)
+
+// generatedSecretData returns keys secret data shaped like the output of `kubectl-paas generate`: every key
+// under its ID, and the current key also under "current".
+func generatedSecretData(current *PrivateKey, others ...*PrivateKey) map[string][]byte {
+	pks := PrivateKeys{"current": current, current.GetID(): current}
+	for _, pk := range others {
+		pks[pk.GetID()] = pk
+	}
+	return pks.AsSecretData()
+}
+
+func encryptWithSecretData(t *testing.T, data map[string][]byte) (*Crypt, string) {
+	t.Helper()
+	keys, err := NewPrivateKeysFromSecretData(data)
+	require.NoError(t, err)
+	c, err := NewCryptFromKeys(keys, nil, secretTestContext)
+	require.NoError(t, err)
+	encrypted, err := c.Encrypt([]byte(secretTestData))
+	require.NoError(t, err, "encrypting with keys from secret data")
+	return c, encrypted
+}
+
+func decryptWithKey(t *testing.T, pk *PrivateKey, encrypted string) ([]byte, error) {
+	t.Helper()
+	c, err := NewCryptFromKeys(PrivateKeys{"only": pk}, nil, secretTestContext)
+	require.NoError(t, err)
+	return c.Decrypt(encrypted)
+}
+
+func TestNewPrivateKeysFromSecretDataMarksCurrent(t *testing.T) {
+	pk, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	keys, err := NewPrivateKeysFromSecretData(generatedSecretData(pk))
+	require.NoError(t, err)
+	assert.True(t, keys["current"].isCurrent, "entry named current is the current key")
+	assert.False(t, keys[pk.GetID()].isCurrent, "entry named by ID is not marked current")
+
+	pub, err := keys.PublicKey()
+	require.NoError(t, err)
+	assert.Equal(t, &pk.privateKey.PublicKey, pub)
+}
+
+func TestEncryptWithGeneratedSecretData(t *testing.T) {
+	pk, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	c, encrypted := encryptWithSecretData(t, generatedSecretData(pk))
+	decrypted, err := c.Decrypt(encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, secretTestData, string(decrypted))
+}
+
+func TestEncryptWithRotatedSecretData(t *testing.T) {
+	oldKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	newKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	data := generatedSecretData(newKey, oldKey)
+
+	// New data is encrypted with the current (new) key only.
+	_, encrypted := encryptWithSecretData(t, data)
+	decrypted, err := decryptWithKey(t, newKey, encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, secretTestData, string(decrypted))
+	_, err = decryptWithKey(t, oldKey, encrypted)
+	require.Error(t, err, "old key cannot decrypt data encrypted after rotation")
+
+	// Data encrypted with the old key still decrypts with the rotated secret.
+	oldCrypt, err := NewCryptFromKeys(PrivateKeys{"current": oldKey}, nil, secretTestContext)
+	require.NoError(t, err)
+	oldEncrypted, err := oldCrypt.Encrypt([]byte(secretTestData))
+	require.NoError(t, err)
+	keys, err := NewPrivateKeysFromSecretData(data)
+	require.NoError(t, err)
+	rotated, err := NewCryptFromKeys(keys, nil, secretTestContext)
+	require.NoError(t, err)
+	decrypted, err = rotated.Decrypt(oldEncrypted)
+	require.NoError(t, err)
+	assert.Equal(t, secretTestData, string(decrypted))
+}
+
+func TestEncryptWithSingleEntrySecretData(t *testing.T) {
+	pk, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	_, encrypted := encryptWithSecretData(t, PrivateKeys{pk.GetID(): pk}.AsSecretData())
+	decrypted, err := decryptWithKey(t, pk, encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, secretTestData, string(decrypted))
+}
+
+func TestGetPublicKeyWithoutCurrentWrapsError(t *testing.T) {
+	pk1, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	pk2, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	keys, err := NewPrivateKeysFromSecretData(PrivateKeys{"a": pk1, "b": pk2}.AsSecretData())
+	require.NoError(t, err)
+	c, err := NewCryptFromKeys(keys, nil, secretTestContext)
+	require.NoError(t, err)
+
+	_, err = c.GetPublicKey()
+	require.Error(t, err)
+	require.Error(t, errors.Unwrap(err), "error from private keys is wrapped")
+	assert.NotContains(t, err.Error(), "%!", "error message is not garbled")
+	assert.Contains(t, err.Error(), "unless there is a 'current' key")
 }
