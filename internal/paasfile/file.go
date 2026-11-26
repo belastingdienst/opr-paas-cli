@@ -184,6 +184,21 @@ func (f *File) SetPaas(newPaas v1alpha2.Paas) error {
 	if len(m) == 0 {
 		return nil
 	}
+	if f.OutputFormat == PreserveFormat {
+		// Preserve mode replaces the old ciphertext text in the file. A value wrapped over several lines
+		// differs from its text in the file, so it cannot be found; fail instead of skipping it silently.
+		var missing int
+		for oldSecret := range m {
+			if !bytes.Contains(f.content, []byte(strings.TrimSpace(oldSecret))) {
+				missing++
+			}
+		}
+		if missing > 0 {
+			return fmt.Errorf("paas %s in %s: %d of %d encrypted values could not be found in the file, "+
+				"probably because they span several lines; preserve mode cannot replace them, "+
+				"use --outputFormat auto instead", newPaas.Name, f.Path, missing, len(m))
+		}
+	}
 	for oldSecret, newSecret := range m {
 		f.content = bytes.ReplaceAll(f.content, []byte(strings.TrimSpace(oldSecret)), []byte(newSecret))
 	}

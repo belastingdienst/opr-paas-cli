@@ -50,7 +50,7 @@ func migrateCmd() *cobra.Command {
 		argNameOutputFormat,
 		"auto",
 		"The outputformat for writing a Paas, either yaml (machine formatted), json (machine formatted), "+
-			"auto (which will use input format as output, machine formatted) or preserved (which will use the "+
+			"auto (which will use input format as output, machine formatted) or preserve (which will use the "+
 			"input format and preserve the original syntax including for example comments) ",
 	)
 
